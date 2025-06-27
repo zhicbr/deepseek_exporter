@@ -1,141 +1,101 @@
 /**
  * =================================================================
- * DeepSeek Exporter - 核心提取引擎 (最终完美版)
- * -----------------------------------------------------------------
- * 修复了表格单元格内公式 `\|` 被错误转义的最终bug。
- * 这是包含所有功能和修复的最终生产版本。
+ * DeepSeek Exporter - 核心提取引擎 (终极稳定版)
  * =================================================================
  */
 
-function convertNodeToMarkdown(node, context) {
-    if (node.nodeType === 3) return node.textContent;
-    if (node.nodeType !== 1) return '';
-    if (node.tagName === 'BR') return '  \n';
+// --- STAGE 1: 网络拦截器 ---
+if (!window.ds_exporter_fetch_injected) {
+    window.ds_exporter_fetch_injected = true;
+    window.DS_EXPORTER_STORE = { active_chat_session_id: null };
 
-    if (node.matches && (node.matches('.katex-display') || node.matches('.katex'))) {
-        const annotation = node.querySelector('annotation');
-        if (annotation && annotation.textContent) {
-            const latexSource = annotation.textContent.trim();
-            if (node.classList.contains('katex-display')) {
-                return context.formulaStyle === 'latex' ? `\\[${latexSource}\\]` : `$$${latexSource}$$`;
-            } else {
-                return context.formulaStyle === 'latex' ? `\\(${latexSource}\\)` : `$${latexSource}$`;
+    const originalFetch = window.fetch;
+    window.fetch = async (...args) => {
+        const [url] = args;
+        const response = await originalFetch(...args);
+        if (typeof url === 'string' && url.includes('/api/v0/chat/history_messages')) {
+            try {
+                const data = await response.clone().json();
+                if (data?.data?.biz_data?.chat_session?.id) {
+                    const sessionId = data.data.biz_data.chat_session.id;
+                    window.DS_EXPORTER_STORE.active_chat_session_id = sessionId;
+                }
+            } catch (e) { /* 忽略解析错误 */ }
+        }
+        return response;
+    };
+}
+
+// --- STAGE 2: 数据库读取与导出逻辑 ---
+function getConversationFromDB(dbName, storeName, key) {
+    return new Promise((resolve, reject) => {
+        const request = window.indexedDB.open(dbName);
+        request.onerror = (event) => reject(`数据库错误: ${request.error}`);
+        request.onsuccess = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(storeName)) {
+                return reject(`对象存储 ${storeName} 未找到`);
             }
-        }
-    }
+            const transaction = db.transaction(storeName, "readonly");
+            const objectStore = transaction.objectStore(storeName);
+            const getRequest = objectStore.get(key);
+            getRequest.onsuccess = () => resolve(getRequest.result);
+            getRequest.onerror = (event) => reject(`获取数据失败: ${event.target.error}`);
+        };
+    });
+}
 
-    let innerMarkdown = '';
-    if (node.hasChildNodes()) {
-        const newContext = { ...context };
-        if (node.tagName === 'UL' || node.tagName === 'OL') {
-            newContext.listDepth = (context.listDepth || 0) + 1;
+async function extractConversation(formulaStyle = 'default') {
+    try {
+        const DB_NAME = "deepseek-chat";
+        const STORE_NAME = "history-message";
+        let conversationId = null;
+
+        if (window.DS_EXPORTER_STORE && window.DS_EXPORTER_STORE.active_chat_session_id) {
+            conversationId = window.DS_EXPORTER_STORE.active_chat_session_id;
         }
-        node.childNodes.forEach(child => {
-            innerMarkdown += convertNodeToMarkdown(child, newContext);
+        
+        if (!conversationId) {
+            try {
+                const pathParts = window.location.pathname.split('/');
+                const idIndex = pathParts.indexOf('s');
+                if (idIndex !== -1 && pathParts.length > idIndex + 1) {
+                    conversationId = pathParts[idIndex + 1];
+                }
+            } catch(e) { /* 忽略URL解析错误 */ }
+        }
+
+        if (!conversationId) {
+            return { success: false, error: "无法确定对话ID, 请刷新或发起新对话。" };
+        }
+
+        const dbData = await getConversationFromDB(DB_NAME, STORE_NAME, conversationId);
+        if (!dbData || !dbData.data) {
+            return { success: false, error: "数据库中未找到该对话的数据。" };
+        }
+
+        const title = dbData.data.chat_session.title;
+        const messages = dbData.data.chat_messages;
+        let fullMarkdown = '';
+
+        messages.forEach(msg => {
+            let content = msg.content || '';
+            const role = msg.role;
+            if (role === 'USER') {
+                fullMarkdown += `### 🧑‍💻 用户\n\n${content.trim()}\n\n---\n\n`;
+            } else if (role === 'ASSISTANT') {
+                if (formulaStyle === 'latex') {
+                    content = content.replace(/\$\$(.*?)\$\$/gs, '\\[$1\\]');
+                    content = content.replace(/(?<![\\\$])\$(?!\$)(.*?)(?<![\\\$])\$(?!\$)/g, '\\($1\\)');
+                }
+                fullMarkdown += `### 🤖 DeepSeek\n\n${content.trim()}\n\n---\n\n`;
+            }
         });
+
+        return { success: true, title, content: fullMarkdown };
+
+    } catch (error) {
+        console.error("DS Exporter: 提取时发生意外错误", error);
+        return { success: false, error: `发生意外错误: ${error.message}` };
     }
-
-    switch (node.tagName.toLowerCase()) {
-        case 'strong': case 'b': return `**${innerMarkdown}**`;
-        case 'em': case 'i': return `*${innerMarkdown}*`;
-        case 'p': return innerMarkdown;
-        case 'li':
-            const indent = '  '.repeat(context.listDepth - 1);
-            const bullet = node.parentElement.tagName === 'OL' ? `${Array.from(node.parentElement.children).indexOf(node) + 1}. ` : '* ';
-            return `${indent}${bullet}${innerMarkdown.trim()}\n`;
-        case 'ul': case 'ol': return innerMarkdown.trim();
-        case 'h3': return `### ${innerMarkdown}`;
-        case 'hr': return '---\n';
-        case 'a': return `[${innerMarkdown}](${node.getAttribute('href') || ''})`;
-        case 'blockquote': return `> ${innerMarkdown.replace(/\n/g, '\n> ')}`;
-        default: return innerMarkdown;
-    }
-}
-
-function buildMarkdownTable(tableNode, context) {
-    const tableRows = [];
-    
-    const processCell = (cellNode) => {
-        let content = convertNodeToMarkdown(cellNode, context).trim();
-        content = content.replace(/\n/g, '<br>'); // 保留单元格内换行
-        // 【关键修复】使用更智能的正则表达式，只转义那些前面不是反斜杠的'|'
-        content = content.replace(/(?<!\\)\|/g, '\\|');
-        return content;
-    };
-    
-    const headerRow = tableNode.querySelector('thead > tr');
-    if (headerRow) {
-        const headers = Array.from(headerRow.children).map(th => processCell(th));
-        tableRows.push(`| ${headers.join(' | ')} |`);
-        tableRows.push(`| ${headers.map(() => '---').join(' | ')} |`);
-    }
-
-    const bodyRows = tableNode.querySelectorAll('tbody > tr');
-    bodyRows.forEach(row => {
-        const cells = Array.from(row.children).map(td => processCell(td));
-        tableRows.push(`| ${cells.join(' | ')} |`);
-    });
-
-    return `\n\n${tableRows.join('\n')}\n\n`;
-}
-
-
-function extractConversation(formulaStyle = 'default') {
-    const SELECTORS = {
-        title: '.d8ed659a',
-        messagesContainer: '.dad65929',
-        userBlockClass: '_9663006',
-        userContent: '.fbb737a4',
-        aiBlockClass: '_4f9bf79',
-        aiContentWrapper: '.ds-markdown.ds-markdown--block'
-    };
-
-    const titleElement = document.querySelector(SELECTORS.title);
-    const conversationTitle = titleElement ? titleElement.innerText.trim() : '未命名对话';
-
-    const messagesContainer = document.querySelector(SELECTORS.messagesContainer);
-    if (!messagesContainer) return null;
-
-    const messageBlocks = messagesContainer.querySelectorAll(':scope > div');
-    let fullMarkdown = '';
-
-    messageBlocks.forEach(block => {
-        if (block.classList.contains(SELECTORS.userBlockClass)) {
-            const userContentElement = block.querySelector(SELECTORS.userContent);
-            if (userContentElement) {
-                fullMarkdown += '### 🧑‍💻 用户\n\n' + userContentElement.innerText.trim() + '\n\n---\n\n';
-            }
-        } else if (block.classList.contains(SELECTORS.aiBlockClass)) {
-            const aiContentWrapper = block.querySelector(SELECTORS.aiContentWrapper);
-            if (aiContentWrapper) {
-                fullMarkdown += '### 🤖 DeepSeek\n\n';
-                
-                const context = { formulaStyle: formulaStyle, listDepth: 0 };
-                let contentParts = [];
-
-                aiContentWrapper.childNodes.forEach(childNode => {
-                    if (childNode.nodeType !== 1) return;
-
-                    if (childNode.matches && childNode.matches('div.markdown-table-wrapper')) {
-                        const table = childNode.querySelector('table');
-                        if (table) {
-                            contentParts.push(buildMarkdownTable(table, context));
-                        }
-                    } else {
-                        const convertedPart = convertNodeToMarkdown(childNode, context);
-                        if (convertedPart && convertedPart.trim() !== '') {
-                            contentParts.push(convertedPart.trim());
-                        }
-                    }
-                });
-                
-                fullMarkdown += contentParts.join('\n\n') + '\n\n---\n\n';
-            }
-        }
-    });
-
-    return {
-        title: conversationTitle,
-        content: fullMarkdown.replace(/\n{3,}/g, '\n\n').trim()
-    };
 }
