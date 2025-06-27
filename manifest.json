@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "DeepSeek 对话导出器",
-  "version": "2.0.1",
-  "description": "采用从缓存中提取历史对话，完美提取并下载DeepSeek完整对话历史。",
+  "version": "2.1.1",
+  "description": "导出deepseek对话为markdown。采用从缓存中提取历史对话，完美提取并下载DeepSeek完整对话历史。",
   "permissions": [
     "storage",
     "scripting"

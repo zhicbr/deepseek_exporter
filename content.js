@@ -1,7 +1,10 @@
 /**
  * =================================================================
- * DeepSeek Exporter - 核心提取引擎 (终极稳定版)
+ * DeepSeek Exporter - 核心提取引擎 (终极稳定版 - 行内公式修复)
  * =================================================================
+ * 
+ * 缓存数据是标准 LaTeX 格式的公式，使用 `\(...\)` 表示行内公式，`\[...\]` 表示块级公式。
+ * 需要做的是在选择markdown通用格式时进行格式转换，选择 LaTeX 格式时则不做转换。
  */
 
 // --- STAGE 1: 网络拦截器 ---
@@ -71,7 +74,7 @@ async function extractConversation(formulaStyle = 'default') {
 
         const dbData = await getConversationFromDB(DB_NAME, STORE_NAME, conversationId);
         if (!dbData || !dbData.data) {
-            return { success: false, error: "数据库中未找到该对话的数据。" };
+            return { success: false, error: "数据库中未找到该对话的数据，请刷新网页后重新导出。" };
         }
 
         const title = dbData.data.chat_session.title;
@@ -84,10 +87,20 @@ async function extractConversation(formulaStyle = 'default') {
             if (role === 'USER') {
                 fullMarkdown += `### 🧑‍💻 用户\n\n${content.trim()}\n\n---\n\n`;
             } else if (role === 'ASSISTANT') {
-                if (formulaStyle === 'latex') {
-                    content = content.replace(/\$\$(.*?)\$\$/gs, '\\[$1\\]');
-                    content = content.replace(/(?<![\\\$])\$(?!\$)(.*?)(?<![\\\$])\$(?!\$)/g, '\\($1\\)');
+                
+                if (formulaStyle === 'default') {
+                    // 将 \[...\] 转换为 $$...$$ (块级公式)
+                    content = content.replace(/\\\[(.*?)\\\]/gs, '$$$1$$');
+                    
+                    // 【修正】
+                    // 将 \(...)\ 转换为 $...$ (行内公式)
+                    // 使用函数作为第二个参数，确保替换的正确性，避免 '$1' 歧义
+                    //错误写法: content = content.replace(/\\\((.*?)\\\)/g, '$$1$'); 
+                    content = content.replace(/\\\((.*?)\\\)/g, (match, group1) => {
+                        return `$${group1}$`;
+                    });
                 }
+                
                 fullMarkdown += `### 🤖 DeepSeek\n\n${content.trim()}\n\n---\n\n`;
             }
         });
