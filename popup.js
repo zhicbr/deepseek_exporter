@@ -1,35 +1,38 @@
 /**
- * popup.js (最终架构修复版)
- * 增加了 world: 'MAIN' 配置，确保脚本在正确的上下文中执行。
+ * popup.js (v4.0.0 - 功能增强版)
+ * - 支持自定义文件名前后缀
+ * - 支持只导出 Assistant 消息
  */
 document.getElementById('exportBtn').addEventListener('click', () => {
-    const formulaStyle = document.getElementById('formulaStyle').value;
+    // 1. 从UI获取所有选项
+    const options = {
+        formulaStyle: document.getElementById('formulaStyle').value,
+        filePrefix: document.getElementById('filePrefix').value.trim(),
+        fileSuffix: document.getElementById('fileSuffix').value.trim(),
+        exportMode: document.getElementById('assistantOnly').checked ? 'assistant_only' : 'all'
+    };
+
     updateStatus("正在提取...", false);
 
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         if (!tabs[0] || !tabs[0].id) {
-            console.error("DS Exporter: 无法获取当前标签页。");
             updateStatus("无法访问当前页面", true);
             return;
         }
 
+        // 2. 将需要注入的选项传递给内容脚本
         chrome.scripting.executeScript({
             target: { tabId: tabs[0].id },
-            // 【关键修正】
-            // 指定函数在页面的“主世界”中执行，
-            // 确保它可以找到由 content.js 定义的 extractConversation 函数。
             world: 'MAIN',
-            func: (style) => extractConversation(style),
-            args: [formulaStyle]
+            func: (opts) => extractConversation(opts),
+            args: [{ formulaStyle: options.formulaStyle, exportMode: options.exportMode }]
         }, 
         (injectionResults) => {
             if (chrome.runtime.lastError) {
-                console.error("DS Exporter: 脚本注入或执行时出错: ", chrome.runtime.lastError.message);
                 updateStatus(`脚本注入失败: ${chrome.runtime.lastError.message}`, true);
                 return;
             }
             if (!injectionResults || !injectionResults[0] || !injectionResults[0].result) {
-                console.error("DS Exporter: 脚本没有返回结果。");
                 updateStatus("未能提取到内容 (无结果返回)", true);
                 return;
             }
@@ -37,13 +40,13 @@ document.getElementById('exportBtn').addEventListener('click', () => {
             const result = injectionResults[0].result;
             if (result && result.success) {
                 if (result.content) {
-                    downloadMarkdown(result.title, result.content);
+                    // 3. 调用下载函数，并传入所有选项用于命名
+                    downloadMarkdown(result.title, result.content, options);
                     updateStatus("导出成功！");
                 } else {
                     updateStatus("提取内容为空", true);
                 }
             } else {
-                console.error("DS Exporter: 提取失败，原因:", result.error);
                 updateStatus(`提取失败: ${result.error}`, true);
             }
         });
@@ -59,13 +62,19 @@ function updateStatus(message, isError = false) {
     }, isError ? 10000 : 3000);
 }
 
-function downloadMarkdown(filename, text) {
-    const safeFilename = filename.replace(/[\/|\\|:|*|?|"|<|>|\|]/g, '_') + '.md';
+// 下载函数现在使用选项来构造最终文件名
+function downloadMarkdown(title, text, options) {
+    // 处理文件名中的非法字符
+    const safeTitle = title.replace(/[\/|\\|:|*|?|"|<|>|\|]/g, '_');
+    // 使用前缀和后缀拼接
+    const filename = `${options.filePrefix}${safeTitle}${options.fileSuffix}.md`;
+    
     const file = new Blob([text], {type: 'text/markdown;charset=utf-8'});
     const element = document.createElement('a');
     element.href = URL.createObjectURL(file);
-    element.download = safeFilename;
+    element.download = filename;
     document.body.appendChild(element);
     element.click();
     document.body.removeChild(element);
+    URL.revokeObjectURL(element.href);
 }

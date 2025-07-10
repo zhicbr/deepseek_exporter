@@ -1,10 +1,8 @@
 /**
  * =================================================================
- * DeepSeek Exporter - 核心提取引擎 (终极稳定版 - 行内公式修复)
+ * DeepSeek Exporter - 核心提取引擎 (v4.0.0 - 功能增强版)
  * =================================================================
- * 
- * 缓存数据是标准 LaTeX 格式的公式，使用 `\(...\)` 表示行内公式，`\[...\]` 表示块级公式。
- * 需要做的是在选择markdown通用格式时进行格式转换，选择 LaTeX 格式时则不做转换。
+ * 新增功能：可以根据选项只导出 ASSISTANT 的消息。
  */
 
 // --- STAGE 1: 网络拦截器 ---
@@ -48,8 +46,10 @@ function getConversationFromDB(dbName, storeName, key) {
     });
 }
 
-async function extractConversation(formulaStyle = 'default') {
+// 函数接收一个 options 对象
+async function extractConversation(options = { formulaStyle: 'default', exportMode: 'all' }) {
     try {
+        const { formulaStyle, exportMode } = options;
         const DB_NAME = "deepseek-chat";
         const STORE_NAME = "history-message";
         let conversationId = null;
@@ -84,26 +84,28 @@ async function extractConversation(formulaStyle = 'default') {
         messages.forEach(msg => {
             let content = msg.content || '';
             const role = msg.role;
+
+            // 【新增逻辑】根据 exportMode 决定是否跳过用户消息
+            if (exportMode === 'assistant_only' && role === 'USER') {
+                return; // 跳过当前循环
+            }
+            
             if (role === 'USER') {
-                fullMarkdown += `### 🧑‍💻 用户\n\n${content.trim()}\n\n---\n\n`;
+                fullMarkdown += `# 🧑‍💻 用户\n\n${content.trim()}\n\n---\n\n`;
             } else if (role === 'ASSISTANT') {
                 
                 if (formulaStyle === 'default') {
-                    // 将 \[...\] 转换为 $$...$$ (块级公式)
                     content = content.replace(/\\\[(.*?)\\\]/gs, '$$$1$$');
-                    
-                    // 【修正】
-                    // 将 \(...)\ 转换为 $...$ (行内公式)
-                    // 使用函数作为第二个参数，确保替换的正确性，避免 '$1' 歧义
-                    //错误写法: content = content.replace(/\\\((.*?)\\\)/g, '$$1$'); 
-                    content = content.replace(/\\\((.*?)\\\)/g, (match, group1) => {
-                        return `$${group1}$`;
-                    });
+                    content = content.replace(/\\\((.*?)\\\)/g, (match, group1) => `$${group1}$`);
                 }
                 
-                fullMarkdown += `### 🤖 DeepSeek\n\n${content.trim()}\n\n---\n\n`;
+                fullMarkdown += `# 🤖 DeepSeek\n\n${content.trim()}\n\n---\n\n`;
             }
         });
+
+        if (fullMarkdown.endsWith('---\n\n')) {
+            fullMarkdown = fullMarkdown.slice(0, -5);
+        }
 
         return { success: true, title, content: fullMarkdown };
 
